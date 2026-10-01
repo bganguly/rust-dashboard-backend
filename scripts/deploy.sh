@@ -18,12 +18,7 @@ DATABASE_URL=""
 _shasum() { shasum -a 256 "$@" 2>/dev/null || sha256sum "$@" 2>/dev/null; }
 
 printf '\n=== rust-dashboard-backend ===\n\n'
-printf '  [1] AWS — App Runner · Neon · scales to zero · ~$0/mo at idle\n'
-printf '\nChoice [1, default 1]: '
-read -r _MODE
-case "${_MODE:-1}" in
-  *) _TARGET="remote" ;;
-esac
+_TARGET="remote"
 
 _STEP="aws auth"
 command -v aws >/dev/null 2>&1 || { printf 'aws CLI not found — install: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html\n' >&2; exit 1; }
