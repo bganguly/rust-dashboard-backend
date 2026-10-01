@@ -182,6 +182,17 @@ _ASC_ARN=$(aws apprunner list-auto-scaling-configurations \
   --query 'AutoScalingConfigurationSummaryList[?Status==`ACTIVE`].AutoScalingConfigurationArn' \
   --output text 2>/dev/null | awk 'NF{print $1;exit}' || true)
 if [[ -z "$_ASC_ARN" ]]; then
+  _inactive_arns=$(aws apprunner list-auto-scaling-configurations \
+    --auto-scaling-configuration-name "rust-dash-scale-to-zero" \
+    --region "$AWS_REGION" \
+    --query 'AutoScalingConfigurationSummaryList[?Status==`INACTIVE`].AutoScalingConfigurationArn' \
+    --output text 2>/dev/null || true)
+  for _arn in $_inactive_arns; do
+    printf '  Deleting inactive revision %s...\n' "$_arn"
+    aws apprunner delete-auto-scaling-configuration \
+      --auto-scaling-configuration-arn "$_arn" \
+      --region "$AWS_REGION" >/dev/null 2>&1 || true
+  done
   printf '  Creating auto-scaling config (min=1, max=2)...\n'
   _ASC_ARN=$(aws apprunner create-auto-scaling-configuration \
     --auto-scaling-configuration-name "rust-dash-scale-to-zero" \
