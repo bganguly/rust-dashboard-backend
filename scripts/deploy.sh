@@ -176,23 +176,15 @@ if [[ -z "$AR_ECR_ROLE_ARN" || "$AR_ECR_ROLE_ARN" == "None" ]]; then
 fi
 
 _STEP="auto scaling config"
-_ASC_ARN=$(aws apprunner list-auto-scaling-configurations \
+_asc_rows=$(aws apprunner list-auto-scaling-configurations \
   --auto-scaling-configuration-name "rust-dash-scale-to-zero" \
   --region "$AWS_REGION" \
-  --query 'AutoScalingConfigurationSummaryList[?Status==`ACTIVE`].AutoScalingConfigurationArn' \
-  --output text 2>/dev/null | awk 'NF{print $1;exit}' || true)
+  --query 'AutoScalingConfigurationSummaryList[*].[AutoScalingConfigurationArn,Status,Latest]' \
+  --output text 2>/dev/null || true)
+_ASC_ARN=$(printf '%s\n' "$_asc_rows" | awk '$2=="ACTIVE" && $3=="True" {print $1; exit}')
+[[ -z "$_ASC_ARN" ]] && _ASC_ARN=$(printf '%s\n' "$_asc_rows" | awk '$2=="ACTIVE" {print $1; exit}')
+[[ -z "$_ASC_ARN" ]] && _ASC_ARN=$(printf '%s\n' "$_asc_rows" | awk 'NF {print $1; exit}')
 if [[ -z "$_ASC_ARN" ]]; then
-  _inactive_arns=$(aws apprunner list-auto-scaling-configurations \
-    --auto-scaling-configuration-name "rust-dash-scale-to-zero" \
-    --region "$AWS_REGION" \
-    --query 'AutoScalingConfigurationSummaryList[?Status==`INACTIVE`].AutoScalingConfigurationArn' \
-    --output text 2>/dev/null || true)
-  for _arn in $_inactive_arns; do
-    printf '  Deleting inactive revision %s...\n' "$_arn"
-    aws apprunner delete-auto-scaling-configuration \
-      --auto-scaling-configuration-arn "$_arn" \
-      --region "$AWS_REGION" >/dev/null 2>&1 || true
-  done
   printf '  Creating auto-scaling config (min=1, max=2)...\n'
   _ASC_ARN=$(aws apprunner create-auto-scaling-configuration \
     --auto-scaling-configuration-name "rust-dash-scale-to-zero" \
