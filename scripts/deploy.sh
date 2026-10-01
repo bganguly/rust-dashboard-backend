@@ -63,6 +63,7 @@ aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGI
 }
 
 TAG=$(find "$ROOT_DIR/src" "$ROOT_DIR/migrations" "$ROOT_DIR/Dockerfile" "$ROOT_DIR/Cargo.toml" \
+    "$ROOT_DIR/buildspec.yml" \
     -type f 2>/dev/null | sort | xargs cat 2>/dev/null \
   | _shasum | cut -c1-16 || true)
 TAG="${TAG:-$(date +%Y%m%d%H%M%S)}"
