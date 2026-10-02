@@ -109,14 +109,14 @@ async fn warmup_cache(pool: sqlx::PgPool, cache: web::Data<cache::AggregatesCach
     for (from_dt, to_dt) in &ranges {
         let from = from_dt.format("%Y-%m-%d").to_string();
         let to = to_dt.format("%Y-%m-%d").to_string();
-        let key = cache::cache_key(&from, &to, 5);
+        let key = cache::cache_key(&from, &to, 4);
 
         if cache.get(&key).is_some() {
             continue;
         }
 
         let data = match services::aggregates::get_daily_aggregates(
-            &pool, &from, &to, "", "", "", None, None, 5,
+            &pool, &from, &to, "", "", "", None, None, 4,
         )
         .await
         {
