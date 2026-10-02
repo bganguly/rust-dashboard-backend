@@ -14,8 +14,7 @@ use crate::services::orders::{
 pub struct OrderQuery {
     q: Option<String>,
     page: Option<i32>,
-    #[serde(rename = "pageSize")]
-    page_size: Option<i32>,
+    size: Option<i32>,
     sort: Option<String>,
     dir: Option<String>,
     status: Option<String>,
@@ -40,10 +39,12 @@ pub async fn list(
     query: web::Query<OrderQuery>,
 ) -> HttpResponse {
     let q = query.q.as_deref().unwrap_or("");
-    let page = query.page.unwrap_or(1);
-    let page_size = query.page_size.unwrap_or(20);
-    let sort = query.sort.as_deref().unwrap_or("placedAt");
-    let dir = query.dir.as_deref().unwrap_or("desc");
+    let page = query.page.unwrap_or(0) + 1;
+    let page_size = query.size.unwrap_or(20);
+    let (sort, dir) = parse_sort_param(
+        query.sort.as_deref().unwrap_or("placedAt"),
+        query.dir.as_deref().unwrap_or("desc"),
+    );
     let status = query.status.as_deref().unwrap_or("");
     let region_code = query.region_code.as_deref().unwrap_or("");
     let from = query.from.as_deref().unwrap_or("");
@@ -116,6 +117,14 @@ pub async fn count(
     match exact_count_uncapped(&pool, q, status, region_code, from, to, query.min_total, query.max_total).await {
         Ok(n) => HttpResponse::Ok().json(json!({"total": n})),
         Err(e) => HttpResponse::InternalServerError().json(json!({"error": e.to_string()})),
+    }
+}
+
+fn parse_sort_param<'a>(raw: &'a str, fallback_dir: &'a str) -> (&'a str, &'a str) {
+    if let Some(i) = raw.rfind(',') {
+        (&raw[..i], &raw[i + 1..])
+    } else {
+        (raw, fallback_dir)
     }
 }
 

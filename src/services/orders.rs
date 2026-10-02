@@ -150,10 +150,6 @@ async fn exact_count_internal(
     from: &str, to: &str,
     min_total: Option<f64>, max_total: Option<f64>,
 ) -> Result<i64, sqlx::Error> {
-    if let Some(n) = try_daily_rollup(pool, q, status, region_code, from, to, min_total, max_total).await? {
-        return Ok(n);
-    }
-
     let cache_key = build_count_cache_key(q, status, region_code, from, to, min_total, max_total);
     if let Some(n) = read_count_cache(pool, &cache_key).await {
         return Ok(n);
@@ -198,10 +194,6 @@ pub async fn exact_count_uncapped(
     from: &str, to: &str,
     min_total: Option<f64>, max_total: Option<f64>,
 ) -> Result<i64, sqlx::Error> {
-    if let Some(n) = try_daily_rollup(pool, q, status, region_code, from, to, min_total, max_total).await? {
-        return Ok(n);
-    }
-
     let cache_key = build_count_cache_key(q, status, region_code, from, to, min_total, max_total);
     if let Some(n) = read_count_cache(pool, &cache_key).await {
         return Ok(n);
@@ -484,38 +476,6 @@ async fn build_result(
         total_pages,
         approximate,
     })
-}
-
-async fn try_daily_rollup(
-    pool: &PgPool,
-    q: &str, status: &str, region_code: &str,
-    from: &str, to: &str,
-    min_total: Option<f64>, max_total: Option<f64>,
-) -> Result<Option<i64>, sqlx::Error> {
-    let pure = q.trim().is_empty()
-        && status.trim().is_empty()
-        && region_code.trim().is_empty()
-        && min_total.is_none()
-        && max_total.is_none();
-    if !pure {
-        return Ok(None);
-    }
-    let sum: i64 = if from.is_empty() || to.is_empty() {
-        sqlx::query_scalar(
-            r#"SELECT COALESCE(SUM("totalOrders"),0)::bigint FROM daily_order_count"#,
-        )
-        .fetch_one(pool)
-        .await?
-    } else {
-        sqlx::query_scalar(
-            r#"SELECT COALESCE(SUM("totalOrders"),0)::bigint FROM daily_order_count WHERE date BETWEEN $1::date AND $2::date"#,
-        )
-        .bind(from)
-        .bind(to)
-        .fetch_one(pool)
-        .await?
-    };
-    Ok(Some(sum))
 }
 
 async fn read_count_cache(pool: &PgPool, key: &str) -> Option<i64> {
