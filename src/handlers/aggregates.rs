@@ -2,6 +2,7 @@ use actix_web::{web, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
+use std::time::Instant;
 
 use crate::cache::{cache_key, AggregatesCache};
 use crate::services::aggregates::{get_daily_aggregates, get_exact_total};
@@ -34,6 +35,7 @@ pub async fn get(
     cache: web::Data<AggregatesCache>,
     query: web::Query<AggQuery>,
 ) -> HttpResponse {
+    let handler_start = Instant::now();
     let from = match &query.from {
         Some(v) if !v.is_empty() => v.clone(),
         _ => return HttpResponse::BadRequest().json(json!({"error": "from and to are required"})),
@@ -56,8 +58,10 @@ pub async fn get(
     let ck = if no_filters && include_data && include_total {
         let k = cache_key(&from, &to, top_categories);
         if let Some(cached) = cache.get(&k) {
+            log::info!("[AGG] cache HIT key={} total={}ms", k, handler_start.elapsed().as_millis());
             return HttpResponse::Ok().json(cached);
         }
+        log::info!("[AGG] cache MISS key={}", k);
         Some(k)
     } else {
         None
@@ -82,13 +86,14 @@ pub async fn get(
 
     let data_fut = async move {
         if include_data {
-            Some(
-                get_daily_aggregates(
-                    &pool_d, &from_d, &to_d, &q_d, &status_d, &rc_d,
-                    min_d, max_d, top_categories,
-                )
-                .await,
+            let t0 = Instant::now();
+            let result = get_daily_aggregates(
+                &pool_d, &from_d, &to_d, &q_d, &status_d, &rc_d,
+                min_d, max_d, top_categories,
             )
+            .await;
+            log::info!("[AGG] get_daily_aggregates done in {}ms err={}", t0.elapsed().as_millis(), result.is_err());
+            Some(result)
         } else {
             None
         }
@@ -96,16 +101,18 @@ pub async fn get(
 
     let total_fut = async move {
         if include_total {
-            Some(
-                get_exact_total(&pool_t, &from_t, &to_t, &q_t, &status_t, &rc_t, min_t, max_t)
-                    .await,
-            )
+            let t0 = Instant::now();
+            let result = get_exact_total(&pool_t, &from_t, &to_t, &q_t, &status_t, &rc_t, min_t, max_t)
+                .await;
+            log::info!("[AGG] get_exact_total done in {}ms err={}", t0.elapsed().as_millis(), result.is_err());
+            Some(result)
         } else {
             None
         }
     };
 
     let (data_res, total_res) = tokio::join!(data_fut, total_fut);
+    log::info!("[AGG] parallel queries done total={}ms", handler_start.elapsed().as_millis());
 
     let mut body = serde_json::Map::new();
 

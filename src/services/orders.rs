@@ -195,9 +195,12 @@ pub async fn exact_count_uncapped(
     min_total: Option<f64>, max_total: Option<f64>,
 ) -> Result<i64, sqlx::Error> {
     let cache_key = build_count_cache_key(q, status, region_code, from, to, min_total, max_total);
+    let t0 = std::time::Instant::now();
     if let Some(n) = read_count_cache(pool, &cache_key).await {
+        log::info!("[COUNT] count_cache HIT key={} in {}ms", cache_key, t0.elapsed().as_millis());
         return Ok(n);
     }
+    log::info!("[COUNT] count_cache MISS key={} lookup={}ms", cache_key, t0.elapsed().as_millis());
 
     let mut qa = QueryArgs::new();
     let (where_clause, needs_region_join) =
@@ -209,9 +212,11 @@ pub async fn exact_count_uncapped(
     };
 
     let sql = format!("SELECT COUNT(*) FROM orders o {region_join}{where_clause}");
+    let t1 = std::time::Instant::now();
     let n: i64 = sqlx::query_scalar_with(&sql, qa.into_args())
         .fetch_one(pool)
         .await?;
+    log::info!("[COUNT] COUNT(*) done in {}ms result={}", t1.elapsed().as_millis(), n);
     write_count_cache(pool, &cache_key, n).await;
     Ok(n)
 }
