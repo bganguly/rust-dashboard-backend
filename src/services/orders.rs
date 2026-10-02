@@ -56,38 +56,27 @@ pub async fn list_orders(
     let op = qa.add_i32(offset);
 
     let sql = format!(
-        r#"WITH paged AS (
-               SELECT ROW_NUMBER() OVER (ORDER BY {effective_order_by}) AS _rn,
-                      o.id, o.status::text, CAST(o.total AS FLOAT8), o.currency, o.notes, o."placedAt",
-                      c.id AS c_id, c.email, c."firstName", c."lastName", c.phone,
-                      r.id AS r_id, r.code AS r_code, r.name AS r_name
-               FROM orders o
-               JOIN customers c ON c.id = o."customerId"
-               {region_join}
-               {where_clause}
-               ORDER BY {effective_order_by}
-               LIMIT {lp} OFFSET {op}
-           )
-           SELECT paged.*, oi.id AS oi_id, oi."productId" AS oi_product_id,
-                  oi.quantity AS oi_qty, CAST(oi."unitPrice" AS FLOAT8) AS oi_unit_price,
-                  CAST(oi.discount AS FLOAT8) AS oi_discount,
-                  pr.sku AS p_sku, pr.name AS p_name
-           FROM paged
-           LEFT JOIN order_items oi ON oi."orderId" = paged.id
-           LEFT JOIN products pr ON pr.id = oi."productId"
-           ORDER BY paged._rn, oi.id"#
+        r#"SELECT o.id, o.status::text, CAST(o.total AS FLOAT8), o.currency, o.notes, o."placedAt",
+                  c.id AS c_id, c.email, c."firstName", c."lastName", c.phone,
+                  r.id AS r_id, r.code AS r_code, r.name AS r_name
+           FROM orders o
+           JOIN customers c ON c.id = o."customerId"
+           {region_join}
+           {where_clause}
+           ORDER BY {effective_order_by}
+           LIMIT {lp} OFFSET {op}"#
     );
 
     let rows = sqlx::query_with(&sql, qa.into_args())
         .fetch_all(pool)
         .await?;
 
-    let (mut order_rows, items_map) = collect_orders_with_items(&rows)?;
+    let mut order_rows = collect_order_rows(&rows)?;
     if use_reverse {
         order_rows.reverse();
     }
 
-    build_result(order_rows, items_map, page, page_size, total, total_pages, approximate)
+    build_result(pool, order_rows, page, page_size, total, total_pages, approximate).await
 }
 
 pub async fn list_orders_by_cursor(
@@ -132,38 +121,27 @@ pub async fn list_orders_by_cursor(
     let lp = qa.add_i32(page_size);
 
     let sql = format!(
-        r#"WITH paged AS (
-               SELECT ROW_NUMBER() OVER (ORDER BY {order_by}) AS _rn,
-                      o.id, o.status::text, CAST(o.total AS FLOAT8), o.currency, o.notes, o."placedAt",
-                      c.id AS c_id, c.email, c."firstName", c."lastName", c.phone,
-                      r.id AS r_id, r.code AS r_code, r.name AS r_name
-               FROM orders o
-               JOIN customers c ON c.id = o."customerId"
-               JOIN regions r ON r.id = o."regionId"
-               {combined_where}
-               ORDER BY {order_by}
-               LIMIT {lp}
-           )
-           SELECT paged.*, oi.id AS oi_id, oi."productId" AS oi_product_id,
-                  oi.quantity AS oi_qty, CAST(oi."unitPrice" AS FLOAT8) AS oi_unit_price,
-                  CAST(oi.discount AS FLOAT8) AS oi_discount,
-                  pr.sku AS p_sku, pr.name AS p_name
-           FROM paged
-           LEFT JOIN order_items oi ON oi."orderId" = paged.id
-           LEFT JOIN products pr ON pr.id = oi."productId"
-           ORDER BY paged._rn, oi.id"#
+        r#"SELECT o.id, o.status::text, CAST(o.total AS FLOAT8), o.currency, o.notes, o."placedAt",
+                  c.id AS c_id, c.email, c."firstName", c."lastName", c.phone,
+                  r.id AS r_id, r.code AS r_code, r.name AS r_name
+           FROM orders o
+           JOIN customers c ON c.id = o."customerId"
+           JOIN regions r ON r.id = o."regionId"
+           {combined_where}
+           ORDER BY {order_by}
+           LIMIT {lp}"#
     );
 
     let rows = sqlx::query_with(&sql, qa.into_args())
         .fetch_all(pool)
         .await?;
 
-    let (mut order_rows, items_map) = collect_orders_with_items(&rows)?;
+    let mut order_rows = collect_order_rows(&rows)?;
     if !forward {
         order_rows.reverse();
     }
 
-    build_result(order_rows, items_map, page, page_size, total, total_pages, approximate)
+    build_result(pool, order_rows, page, page_size, total, total_pages, approximate).await
 }
 
 async fn exact_count_internal(
@@ -394,19 +372,11 @@ struct OrderRow {
     r_name: String,
 }
 
-fn collect_orders_with_items(
-    rows: &[sqlx::postgres::PgRow],
-) -> Result<(Vec<OrderRow>, HashMap<i32, Vec<OrderItemDTO>>), sqlx::Error> {
-    let mut orders: Vec<OrderRow> = vec![];
-    let mut seen: std::collections::HashSet<i32> = Default::default();
-    let mut items_map: HashMap<i32, Vec<OrderItemDTO>> = HashMap::new();
-
-    for r in rows {
-        let order_id: i32 = r.try_get("id")?;
-        if !seen.contains(&order_id) {
-            seen.insert(order_id);
-            orders.push(OrderRow {
-                id: order_id,
+fn collect_order_rows(rows: &[sqlx::postgres::PgRow]) -> Result<Vec<OrderRow>, sqlx::Error> {
+    rows.iter()
+        .map(|r| {
+            Ok(OrderRow {
+                id: r.try_get("id")?,
                 status: r.try_get("status")?,
                 total: r.try_get("total")?,
                 currency: r.try_get("currency")?,
@@ -420,31 +390,51 @@ fn collect_orders_with_items(
                 r_id: r.try_get("r_id")?,
                 r_code: r.try_get("r_code")?,
                 r_name: r.try_get("r_name")?,
-            });
-        }
-        let oi_id: Option<i32> = r.try_get("oi_id")?;
-        if let Some(item_id) = oi_id {
-            let product_id: i32 = r.try_get("oi_product_id")?;
-            items_map.entry(order_id).or_default().push(OrderItemDTO {
-                id: item_id,
-                product_id,
-                quantity: r.try_get("oi_qty")?,
-                unit_price: r.try_get("oi_unit_price")?,
-                discount: r.try_get("oi_discount")?,
-                product: ProductSummaryDTO {
-                    id: product_id,
-                    sku: r.try_get("p_sku")?,
-                    name: r.try_get("p_name")?,
-                },
-            });
-        }
-    }
-    Ok((orders, items_map))
+            })
+        })
+        .collect()
 }
 
-fn build_result(
+async fn fetch_items(pool: &PgPool, ids: &[i32]) -> Result<HashMap<i32, Vec<OrderItemDTO>>, sqlx::Error> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"SELECT oi."orderId", oi.id, oi."productId", oi.quantity,
+                  CAST(oi."unitPrice" AS FLOAT8) AS "unitPrice",
+                  CAST(oi.discount AS FLOAT8) AS discount,
+                  pr.sku, pr.name AS p_name
+           FROM order_items oi
+           JOIN products pr ON pr.id = oi."productId"
+           WHERE oi."orderId" = ANY($1::int4[])"#,
+    )
+    .bind(ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut map: HashMap<i32, Vec<OrderItemDTO>> = HashMap::new();
+    for r in &rows {
+        let order_id: i32 = r.try_get("orderId")?;
+        let product_id: i32 = r.try_get("productId")?;
+        map.entry(order_id).or_default().push(OrderItemDTO {
+            id: r.try_get("id")?,
+            product_id,
+            quantity: r.try_get("quantity")?,
+            unit_price: r.try_get("unitPrice")?,
+            discount: r.try_get("discount")?,
+            product: ProductSummaryDTO {
+                id: product_id,
+                sku: r.try_get("sku")?,
+                name: r.try_get("p_name")?,
+            },
+        });
+    }
+    Ok(map)
+}
+
+async fn build_result(
+    pool: &PgPool,
     rows: Vec<OrderRow>,
-    items_map: HashMap<i32, Vec<OrderItemDTO>>,
     page: i32, page_size: i32,
     total: i64, total_pages: i32, approximate: bool,
 ) -> Result<OrderListResult, sqlx::Error> {
@@ -458,6 +448,9 @@ fn build_result(
             approximate,
         });
     }
+
+    let ids: Vec<i32> = rows.iter().map(|r| r.id).collect();
+    let items_map = fetch_items(pool, &ids).await?;
 
     let data = rows
         .iter()
