@@ -537,7 +537,7 @@ pub fn build_order_where(
     }
     if !from.is_empty() {
         let p = qa.add_str(from.to_string());
-        clauses.push(format!(r#"o."placedAt" >= {p}::timestamp"#));
+        clauses.push(format!(r#"o."placedAt" >= {p}::timestamptz"#));
     }
     if !to.is_empty() {
         let p = qa.add_str(to.to_string());
