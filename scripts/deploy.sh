@@ -201,7 +201,7 @@ _SVC_ARN=$(aws apprunner list-services --region "$AWS_REGION" \
 
 _env_vars="{\"DATABASE_URL\":\"${DATABASE_URL}\",\"CORS_ORIGIN\":\"*\",\"MIGRATIONS_DIR\":\"/app/migrations\",\"BACKEND_RUNTIME\":\"rust\",\"PORT\":\"8080\",\"RUST_LOG\":\"info\"}"
 _source_config="{\"ImageRepository\":{\"ImageIdentifier\":\"${IMAGE}\",\"ImageConfiguration\":{\"Port\":\"8080\",\"RuntimeEnvironmentVariables\":${_env_vars}},\"ImageRepositoryType\":\"ECR\"},\"AuthenticationConfiguration\":{\"AccessRoleArn\":\"${AR_ECR_ROLE_ARN}\"},\"AutoDeploymentsEnabled\":false}"
-_instance_config="{\"Cpu\":\"1024\",\"Memory\":\"2048\"}"
+_instance_config="{\"Cpu\":\"256\",\"Memory\":\"512\"}"
 
 if [[ -z "$_SVC_ARN" ]]; then
   printf '\n=== creating App Runner service: %s ===\n' "$SERVICE_NAME"
