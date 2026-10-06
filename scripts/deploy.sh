@@ -14,73 +14,101 @@ ECR_REPO="rust-dash-backend"
 CODEBUILD_PROJECT="rust-dash-backend-build"
 ENV_FILE="$ROOT_DIR/.env.aws"
 DATABASE_URL=""
+ACCOUNT_ID=""
+TAG=""
+IMAGE=""
+IMAGE_CACHE=""
+ECR_URI=""
+AR_ECR_ROLE_ARN=""
+_ASC_ARN=""
+_SVC_ARN=""
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 _shasum() { shasum -a 256 "$@" 2>/dev/null || sha256sum "$@" 2>/dev/null; }
-
-printf '\n=== rust-dashboard-backend ===\n\n'
-_TARGET="remote"
-
-_STEP="aws auth"
-command -v aws >/dev/null 2>&1 || { printf 'aws CLI not found — install: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html\n' >&2; exit 1; }
-aws sts get-caller-identity >/dev/null 2>&1 || { printf 'AWS credentials not configured — run: aws configure\n' >&2; exit 1; }
-ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-printf 'Auth: account %s  region %s\n' "$ACCOUNT_ID" "$AWS_REGION"
-
-_STEP="db config"
-_saved_url=""
-[[ -f "$ENV_FILE" ]] && _saved_url=$(grep -E '^DATABASE_URL=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
-
-if [[ -z "$_saved_url" ]]; then
-  _repo_root="$(cd "$ROOT_DIR/../.." && pwd)"
-  _saved_url=$(find "$_repo_root" -name '.env*' -not -name '*.example' -type f 2>/dev/null \
-    | xargs grep -h -E '^(NEON_)?DATABASE_URL=' 2>/dev/null \
-    | grep 'neon\.tech' | head -1 | cut -d= -f2- | tr -d '"' || true)
-fi
-
-if [[ -n "$_saved_url" ]]; then
-  printf '\n  Use saved db creds (Y/n): '
-  read -r _USE_SAVED
-  case "${_USE_SAVED:-Y}" in
-    [Nn]*) printf '  Enter Neon DATABASE_URL:\n  > '; read -r DATABASE_URL ;;
-    *) DATABASE_URL="$_saved_url" ;;
-  esac
-else
-  printf '\n  Enter Neon DATABASE_URL\n'
-  printf '  (postgresql://user:pass@ep-xxx.neon.tech/dbname?sslmode=require):\n  > '
-  read -r DATABASE_URL
-  [[ -n "$DATABASE_URL" ]] || { printf 'DATABASE_URL is required.\n' >&2; exit 1; }
-fi
-
-_STEP="db preflight"
-_conn=$(psql "$DATABASE_URL" -t -c 'SELECT 1;' 2>/dev/null | tr -d ' \n' || printf '')
-[[ "$_conn" == "1" ]] || { printf 'Cannot connect to Neon DB — check URL.\n' >&2; exit 1; }
-printf 'DB connection: OK\n'
-
-_STEP="ecr repo"
-aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" >/dev/null 2>&1 || {
-  printf '  Creating ECR repo %s...\n' "$ECR_REPO"
-  aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" >/dev/null
-}
-
-TAG=$(find "$ROOT_DIR/src" "$ROOT_DIR/migrations" "$ROOT_DIR/Dockerfile" "$ROOT_DIR/Cargo.toml" \
-    "$ROOT_DIR/buildspec.yml" \
-    -type f 2>/dev/null | sort | xargs cat 2>/dev/null \
-  | _shasum | cut -c1-16 || true)
-TAG="${TAG:-$(date +%Y%m%d%H%M%S)}"
-IMAGE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}"
-IMAGE_CACHE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:cache"
-ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 
 _img_exists() {
   aws ecr describe-images --repository-name "$ECR_REPO" --image-ids "imageTag=$1" \
     --region "$AWS_REGION" >/dev/null 2>&1
 }
 
-if _img_exists "$TAG"; then
-  printf '  Image %s exists — skipping build.\n' "$TAG"
-else
+# ── AWS auth ──────────────────────────────────────────────────────────────────
+
+_check_aws_auth() {
+  _STEP="aws auth"
+  printf '\n=== rust-dashboard-backend ===\n\n'
+  command -v aws >/dev/null 2>&1 || { printf 'aws CLI not found — install: https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html\n' >&2; exit 1; }
+  aws sts get-caller-identity >/dev/null 2>&1 || { printf 'AWS credentials not configured — run: aws configure\n' >&2; exit 1; }
+  ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+  printf 'Auth: account %s  region %s\n' "$ACCOUNT_ID" "$AWS_REGION"
+}
+
+# ── Collect DB URL ────────────────────────────────────────────────────────────
+
+_collect_db_url() {
+  _STEP="db config"
+  local _saved_url=""
+  [[ -f "$ENV_FILE" ]] && _saved_url=$(grep -E '^DATABASE_URL=' "$ENV_FILE" | cut -d= -f2- | tr -d '"' || true)
+
+  if [[ -z "$_saved_url" ]]; then
+    local _repo_root
+    _repo_root="$(cd "$ROOT_DIR/../.." && pwd)"
+    _saved_url=$(find "$_repo_root" -name '.env*' -not -name '*.example' -type f 2>/dev/null \
+      | xargs grep -h -E '^(NEON_)?DATABASE_URL=' 2>/dev/null \
+      | grep 'neon\.tech' | head -1 | cut -d= -f2- | tr -d '"' || true)
+  fi
+
+  if [[ -n "$_saved_url" ]]; then
+    printf '\n  Use saved db creds (Y/n): '
+    read -r _USE_SAVED
+    case "${_USE_SAVED:-Y}" in
+      [Nn]*) printf '  Enter Neon DATABASE_URL:\n  > '; read -r DATABASE_URL ;;
+      *) DATABASE_URL="$_saved_url" ;;
+    esac
+  else
+    printf '\n  Enter Neon DATABASE_URL\n'
+    printf '  (postgresql://user:pass@ep-xxx.neon.tech/dbname?sslmode=require):\n  > '
+    read -r DATABASE_URL
+    [[ -n "$DATABASE_URL" ]] || { printf 'DATABASE_URL is required.\n' >&2; exit 1; }
+  fi
+
+  _STEP="db preflight"
+  local _conn
+  _conn=$(psql "$DATABASE_URL" -t -c 'SELECT 1;' 2>/dev/null | tr -d ' \n' || printf '')
+  [[ "$_conn" == "1" ]] || { printf 'Cannot connect to Neon DB — check URL.\n' >&2; exit 1; }
+  printf 'DB connection: OK\n'
+}
+
+# ── ECR repo ──────────────────────────────────────────────────────────────────
+
+_ensure_ecr() {
+  _STEP="ecr repo"
+  aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" >/dev/null 2>&1 || {
+    printf '  Creating ECR repo %s...\n' "$ECR_REPO"
+    aws ecr create-repository --repository-name "$ECR_REPO" --region "$AWS_REGION" >/dev/null
+  }
+
+  TAG=$(find "$ROOT_DIR/src" "$ROOT_DIR/migrations" "$ROOT_DIR/Dockerfile" "$ROOT_DIR/Cargo.toml" \
+      "$ROOT_DIR/buildspec.yml" \
+      -type f 2>/dev/null | sort | xargs cat 2>/dev/null \
+    | _shasum | cut -c1-16 || true)
+  TAG="${TAG:-$(date +%Y%m%d%H%M%S)}"
+  IMAGE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${TAG}"
+  IMAGE_CACHE="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:cache"
+  ECR_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+}
+
+# ── Build image via CodeBuild ─────────────────────────────────────────────────
+
+_build_image() {
+  if _img_exists "$TAG"; then
+    printf '  Image %s exists — skipping build.\n' "$TAG"
+    return
+  fi
+
   _STEP="codebuild iam role"
-  CB_ROLE="rust-dash-codebuild-role"
+  local CB_ROLE="rust-dash-codebuild-role"
+  local CB_ROLE_ARN
   CB_ROLE_ARN=$(aws iam get-role --role-name "$CB_ROLE" --query 'Role.Arn' --output text 2>/dev/null || true)
   if [[ -z "$CB_ROLE_ARN" || "$CB_ROLE_ARN" == "None" ]]; then
     printf '  Creating CodeBuild IAM role...\n'
@@ -102,7 +130,7 @@ else
     --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["ecr-public:GetAuthorizationToken","sts:GetServiceBearerToken"],"Resource":"*"}]}'
 
   _STEP="s3 source bucket"
-  SRC_BUCKET="rust-dash-codebuild-src-${ACCOUNT_ID}"
+  local SRC_BUCKET="rust-dash-codebuild-src-${ACCOUNT_ID}"
   aws s3api head-bucket --bucket "$SRC_BUCKET" 2>/dev/null || {
     printf '  Creating S3 source bucket %s...\n' "$SRC_BUCKET"
     if [[ "$AWS_REGION" == "us-east-1" ]]; then
@@ -114,6 +142,7 @@ else
   }
 
   _STEP="codebuild project"
+  local _CB_EXISTS _cb_source _cb_env
   _CB_EXISTS=$(aws codebuild batch-get-projects --names "$CODEBUILD_PROJECT" \
     --query 'projects[0].name' --output text 2>/dev/null || true)
   _cb_source="{\"type\":\"S3\",\"location\":\"${SRC_BUCKET}/rust-dash-backend-source.zip\"}"
@@ -132,7 +161,7 @@ else
   fi
 
   _STEP="image build"
-  _tmpzip="${TMPDIR:-/tmp}/rust-dash-be-src-$$.zip"
+  local _tmpzip="${TMPDIR:-/tmp}/rust-dash-be-src-$$.zip"
   printf 'Packaging source...\n'
   (cd "$ROOT_DIR" && zip -qr "$_tmpzip" . -x '.git/*' -x '.env*' -x 'target/*' -x '*.zip')
   printf 'Uploading source to S3...\n'
@@ -140,6 +169,7 @@ else
   rm -f "$_tmpzip"
 
   printf 'Starting CodeBuild build (Rust compile ~5-10 min cold)...\n'
+  local BUILD_ID
   BUILD_ID=$(aws codebuild start-build \
     --project-name "$CODEBUILD_PROJECT" \
     --environment-variables-override \
@@ -148,7 +178,7 @@ else
     --query 'build.id' --output text)
   printf '  Build ID: %s\n' "$BUILD_ID"
 
-  _cb_elapsed=0
+  local _cb_elapsed=0 _STATUS
   while true; do
     _STATUS=$(aws codebuild batch-get-builds --ids "$BUILD_ID" \
       --query 'builds[0].buildStatus' --output text --region "$AWS_REGION")
@@ -161,92 +191,117 @@ else
     printf '  ...%ds (%s)\n' "$_cb_elapsed" "$_STATUS"
     sleep 15
   done
-fi
+}
 
-_STEP="app runner ecr role"
-AR_ECR_ROLE="rust-dash-apprunner-ecr-role"
-AR_ECR_ROLE_ARN=$(aws iam get-role --role-name "$AR_ECR_ROLE" --query 'Role.Arn' --output text 2>/dev/null || true)
-if [[ -z "$AR_ECR_ROLE_ARN" || "$AR_ECR_ROLE_ARN" == "None" ]]; then
-  printf '  Creating App Runner ECR access role...\n'
-  AR_ECR_ROLE_ARN=$(aws iam create-role --role-name "$AR_ECR_ROLE" \
-    --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"build.apprunner.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
-    --query 'Role.Arn' --output text)
-  aws iam attach-role-policy --role-name "$AR_ECR_ROLE" \
-    --policy-arn arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess
-  sleep 10
-fi
+# ── App Runner ECR role ───────────────────────────────────────────────────────
 
-_STEP="auto scaling config"
-_asc_rows=$(aws apprunner list-auto-scaling-configurations \
-  --auto-scaling-configuration-name "rust-dash-scale-to-zero" \
-  --region "$AWS_REGION" \
-  --query 'AutoScalingConfigurationSummaryList[*].[AutoScalingConfigurationArn,Status,Latest]' \
-  --output text 2>/dev/null || true)
-_ASC_ARN=$(printf '%s\n' "$_asc_rows" | awk '$2=="ACTIVE" && $3=="True" {print $1; exit}')
-[[ -z "$_ASC_ARN" ]] && _ASC_ARN=$(printf '%s\n' "$_asc_rows" | awk '$2=="ACTIVE" {print $1; exit}')
-[[ -z "$_ASC_ARN" ]] && _ASC_ARN=$(printf '%s\n' "$_asc_rows" | awk 'NF {print $1; exit}')
-if [[ -z "$_ASC_ARN" ]]; then
-  printf '  Creating auto-scaling config (min=1, max=2)...\n'
-  _ASC_ARN=$(aws apprunner create-auto-scaling-configuration \
+_ensure_apprunner_role() {
+  _STEP="app runner ecr role"
+  local AR_ECR_ROLE="rust-dash-apprunner-ecr-role"
+  AR_ECR_ROLE_ARN=$(aws iam get-role --role-name "$AR_ECR_ROLE" --query 'Role.Arn' --output text 2>/dev/null || true)
+  if [[ -z "$AR_ECR_ROLE_ARN" || "$AR_ECR_ROLE_ARN" == "None" ]]; then
+    printf '  Creating App Runner ECR access role...\n'
+    AR_ECR_ROLE_ARN=$(aws iam create-role --role-name "$AR_ECR_ROLE" \
+      --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"build.apprunner.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
+      --query 'Role.Arn' --output text)
+    aws iam attach-role-policy --role-name "$AR_ECR_ROLE" \
+      --policy-arn arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess
+    sleep 10
+  fi
+}
+
+# ── Auto scaling config ───────────────────────────────────────────────────────
+
+_ensure_autoscaling() {
+  _STEP="auto scaling config"
+  local _asc_rows
+  _asc_rows=$(aws apprunner list-auto-scaling-configurations \
     --auto-scaling-configuration-name "rust-dash-scale-to-zero" \
-    --min-size 1 --max-size 2 --max-concurrency 100 \
     --region "$AWS_REGION" \
-    --query 'AutoScalingConfiguration.AutoScalingConfigurationArn' --output text)
-fi
+    --query 'AutoScalingConfigurationSummaryList[*].[AutoScalingConfigurationArn,Status,Latest]' \
+    --output text 2>/dev/null || true)
+  _ASC_ARN=$(printf '%s\n' "$_asc_rows" | awk '$2=="ACTIVE" && $3=="True" {print $1; exit}')
+  [[ -z "$_ASC_ARN" ]] && _ASC_ARN=$(printf '%s\n' "$_asc_rows" | awk '$2=="ACTIVE" {print $1; exit}')
+  [[ -z "$_ASC_ARN" ]] && _ASC_ARN=$(printf '%s\n' "$_asc_rows" | awk 'NF {print $1; exit}')
+  if [[ -z "$_ASC_ARN" ]]; then
+    printf '  Creating auto-scaling config (min=1, max=2)...\n'
+    _ASC_ARN=$(aws apprunner create-auto-scaling-configuration \
+      --auto-scaling-configuration-name "rust-dash-scale-to-zero" \
+      --min-size 1 --max-size 2 --max-concurrency 100 \
+      --region "$AWS_REGION" \
+      --query 'AutoScalingConfiguration.AutoScalingConfigurationArn' --output text)
+  fi
+}
 
-_STEP="app runner deploy"
-_SVC_ARN=$(aws apprunner list-services --region "$AWS_REGION" \
-  --query "ServiceSummaryList[?ServiceName=='${SERVICE_NAME}'].ServiceArn" \
-  --output text 2>/dev/null | awk 'NF{print $1;exit}' || true)
+# ── App Runner deploy ─────────────────────────────────────────────────────────
 
-_env_vars="{\"DATABASE_URL\":\"${DATABASE_URL}\",\"CORS_ORIGIN\":\"*\",\"MIGRATIONS_DIR\":\"/app/migrations\",\"BACKEND_RUNTIME\":\"rust\",\"PORT\":\"8080\",\"RUST_LOG\":\"info\"}"
-_source_config="{\"ImageRepository\":{\"ImageIdentifier\":\"${IMAGE}\",\"ImageConfiguration\":{\"Port\":\"8080\",\"RuntimeEnvironmentVariables\":${_env_vars}},\"ImageRepositoryType\":\"ECR\"},\"AuthenticationConfiguration\":{\"AccessRoleArn\":\"${AR_ECR_ROLE_ARN}\"},\"AutoDeploymentsEnabled\":false}"
-_instance_config="{\"Cpu\":\"256\",\"Memory\":\"512\"}"
+_deploy_apprunner() {
+  _STEP="app runner deploy"
+  _SVC_ARN=$(aws apprunner list-services --region "$AWS_REGION" \
+    --query "ServiceSummaryList[?ServiceName=='${SERVICE_NAME}'].ServiceArn" \
+    --output text 2>/dev/null | awk 'NF{print $1;exit}' || true)
 
-if [[ -z "$_SVC_ARN" ]]; then
-  printf '\n=== creating App Runner service: %s ===\n' "$SERVICE_NAME"
-  _SVC_ARN=$(aws apprunner create-service \
-    --service-name "$SERVICE_NAME" \
-    --source-configuration "$_source_config" \
-    --instance-configuration "$_instance_config" \
-    --auto-scaling-configuration-arn "$_ASC_ARN" \
-    --region "$AWS_REGION" \
-    --query 'Service.ServiceArn' --output text)
-else
-  printf '\n=== updating App Runner service: %s ===\n' "$SERVICE_NAME"
-  aws apprunner update-service \
-    --service-arn "$_SVC_ARN" \
-    --source-configuration "$_source_config" \
-    --instance-configuration "$_instance_config" \
-    --auto-scaling-configuration-arn "$_ASC_ARN" \
-    --region "$AWS_REGION" >/dev/null
-fi
+  local _env_vars _source_config _instance_config
+  _env_vars="{\"DATABASE_URL\":\"${DATABASE_URL}\",\"CORS_ORIGIN\":\"*\",\"MIGRATIONS_DIR\":\"/app/migrations\",\"BACKEND_RUNTIME\":\"rust\",\"PORT\":\"8080\",\"RUST_LOG\":\"info\"}"
+  _source_config="{\"ImageRepository\":{\"ImageIdentifier\":\"${IMAGE}\",\"ImageConfiguration\":{\"Port\":\"8080\",\"RuntimeEnvironmentVariables\":${_env_vars}},\"ImageRepositoryType\":\"ECR\"},\"AuthenticationConfiguration\":{\"AccessRoleArn\":\"${AR_ECR_ROLE_ARN}\"},\"AutoDeploymentsEnabled\":false}"
+  _instance_config="{\"Cpu\":\"256\",\"Memory\":\"512\"}"
 
-printf '  Waiting for service to reach RUNNING state...\n'
-_ar_elapsed=0
-while true; do
-  _SVC_STATUS=$(aws apprunner describe-service --service-arn "$_SVC_ARN" \
-    --region "$AWS_REGION" --query 'Service.Status' --output text)
-  case "$_SVC_STATUS" in
-    RUNNING) printf '  Service is RUNNING.\n'; break ;;
-    CREATE_FAILED|UPDATE_FAILED|DELETE_FAILED) printf 'Service %s — check App Runner console.\n' "$_SVC_STATUS" >&2; exit 1 ;;
-  esac
-  (( _ar_elapsed += 15 ))
-  (( _ar_elapsed > 600 )) && { printf 'Timed out waiting for App Runner (10 min).\n' >&2; exit 1; }
-  printf '  ...%ds (%s)\n' "$_ar_elapsed" "$_SVC_STATUS"
-  sleep 15
-done
+  if [[ -z "$_SVC_ARN" ]]; then
+    printf '\n=== creating App Runner service: %s ===\n' "$SERVICE_NAME"
+    _SVC_ARN=$(aws apprunner create-service \
+      --service-name "$SERVICE_NAME" \
+      --source-configuration "$_source_config" \
+      --instance-configuration "$_instance_config" \
+      --auto-scaling-configuration-arn "$_ASC_ARN" \
+      --region "$AWS_REGION" \
+      --query 'Service.ServiceArn' --output text)
+  else
+    printf '\n=== updating App Runner service: %s ===\n' "$SERVICE_NAME"
+    aws apprunner update-service \
+      --service-arn "$_SVC_ARN" \
+      --source-configuration "$_source_config" \
+      --instance-configuration "$_instance_config" \
+      --auto-scaling-configuration-arn "$_ASC_ARN" \
+      --region "$AWS_REGION" >/dev/null
+  fi
 
-BACKEND_URL="https://$(aws apprunner describe-service --service-arn "$_SVC_ARN" \
-  --region "$AWS_REGION" --query 'Service.ServiceUrl' --output text)"
+  printf '  Waiting for service to reach RUNNING state...\n'
+  local _ar_elapsed=0 _SVC_STATUS
+  while true; do
+    _SVC_STATUS=$(aws apprunner describe-service --service-arn "$_SVC_ARN" \
+      --region "$AWS_REGION" --query 'Service.Status' --output text)
+    case "$_SVC_STATUS" in
+      RUNNING) printf '  Service is RUNNING.\n'; break ;;
+      CREATE_FAILED|UPDATE_FAILED|DELETE_FAILED) printf 'Service %s — check App Runner console.\n' "$_SVC_STATUS" >&2; exit 1 ;;
+    esac
+    (( _ar_elapsed += 15 ))
+    (( _ar_elapsed > 600 )) && { printf 'Timed out waiting for App Runner (10 min).\n' >&2; exit 1; }
+    printf '  ...%ds (%s)\n' "$_ar_elapsed" "$_SVC_STATUS"
+    sleep 15
+  done
 
-printf '\nWriting %s...\n' "$ENV_FILE"
-cat > "$ENV_FILE" <<ENVEOF
+  local BACKEND_URL_FINAL
+  BACKEND_URL_FINAL="https://$(aws apprunner describe-service --service-arn "$_SVC_ARN" \
+    --region "$AWS_REGION" --query 'Service.ServiceUrl' --output text)"
+
+  printf '\nWriting %s...\n' "$ENV_FILE"
+  cat > "$ENV_FILE" <<ENVEOF
 AWS_REGION=${AWS_REGION}
 DATABASE_URL=${DATABASE_URL}
-BACKEND_URL=${BACKEND_URL}
+BACKEND_URL=${BACKEND_URL_FINAL}
 SERVICE_NAME=${SERVICE_NAME}
 SERVICE_ARN=${_SVC_ARN}
 ENVEOF
 
-printf '\nDone. Backend URL:\n  %s\n' "$BACKEND_URL"
+  printf '\nDone. Backend URL:\n  %s\n' "$BACKEND_URL_FINAL"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+_check_aws_auth
+_collect_db_url
+_ensure_ecr
+_build_image
+_ensure_apprunner_role
+_ensure_autoscaling
+_deploy_apprunner
