@@ -12,6 +12,7 @@ an AWS App Runner service — images built remotely via AWS CodeBuild and stored
 | Endpoint | URL |
 |---|---|
 | **API Explorer** | https://9vicazj2md.us-east-1.awsapprunner.com/api-explorer |
+| **App** | https://9vicazj2md.us-east-1.awsapprunner.com |
 | **Portfolio demo** | https://bganguly.github.io/#rust_dashboard |
 
 > App Runner keeps a minimum of one instance running; the first request after a period of low traffic may have a slight delay.
