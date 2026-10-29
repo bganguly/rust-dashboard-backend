@@ -89,7 +89,8 @@ async fn main() -> std::io::Result<()> {
                     .route("/orders/count", web::get().to(handlers::orders::count))
                     .route("/aggregates", web::get().to(handlers::aggregates::get))
                     .route("/customers", web::get().to(handlers::customers::list))
-                    .route("/regions", web::get().to(handlers::regions::list)),
+                    .route("/regions", web::get().to(handlers::regions::list))
+                    .route("/dataset-bounds", web::get().to(handlers::dataset_bounds::get)),
             )
     })
     .bind(&addr)?
