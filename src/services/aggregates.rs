@@ -27,7 +27,12 @@ pub async fn get_daily_aggregates(
     let has_total = min_total.is_some() || max_total.is_some();
 
     let rows = match (has_q, is_multi_token, has_status, has_region, has_total) {
-        (false, _, false, false, false) => query_daily_summary(pool, from, to, region_code).await?,
+        (false, _, false, false, false) => {
+            let eff_top_n = if top_categories <= 0 { 5 } else { top_categories } as usize;
+            return Ok(build_aggregate_result_pre_bucketed(
+                query_daily_summary_bucketed(pool, from, to, region_code, eff_top_n).await?
+            ));
+        }
         (true, true, _, _, false) => {
             let rows = query_multi_token_via_cte(pool, from, to, q, status, region_code).await?;
             if rows.is_empty() {
@@ -78,30 +83,86 @@ async fn query_agg_rows(
         .collect()
 }
 
-async fn query_daily_summary(
+async fn query_daily_summary_bucketed(
     pool: &PgPool,
-    from: &str, to: &str, region_code: &str,
+    from: &str, to: &str, region_code: &str, top_n: usize,
 ) -> Result<Vec<AggRow>, sqlx::Error> {
-    let mut extra = String::new();
+    let mut region_filter = String::new();
     if !region_code.is_empty() {
         let quoted: Vec<String> = split_trim(region_code)
             .iter()
             .map(|c| format!("'{}'", c.replace('\'', "''")))
             .collect();
-        extra = format!(r#" AND "regionCode" = ANY(ARRAY[{}])"#, quoted.join(","));
+        region_filter = format!(r#" AND "regionCode" = ANY(ARRAY[{}])"#, quoted.join(","));
     }
     let sql = format!(
-        r#"SELECT date::text AS day, "categoryName" AS category,
-                  SUM("totalOrders")::bigint AS total_orders, CAST(SUM("totalRevenue") AS FLOAT8) AS total_revenue,
+        r#"WITH top_cats AS (
+             SELECT "categoryName" FROM daily_summary
+             WHERE date BETWEEN $1::date AND $2::date{region_filter}
+             GROUP BY "categoryName" ORDER BY SUM("totalOrders") DESC LIMIT $3
+           )
+           SELECT date::text AS day,
+                  CASE WHEN "categoryName" IN (SELECT "categoryName" FROM top_cats)
+                       THEN "categoryName" ELSE 'Others' END AS category,
+                  SUM("totalOrders")::bigint AS total_orders,
+                  CAST(SUM("totalRevenue") AS FLOAT8) AS total_revenue,
                   SUM("totalItems")::bigint AS total_items
            FROM daily_summary
-           WHERE date BETWEEN $1::date AND $2::date{extra}
-           GROUP BY date, "categoryName" ORDER BY date"#
+           WHERE date BETWEEN $1::date AND $2::date{region_filter}
+           GROUP BY date,
+                    CASE WHEN "categoryName" IN (SELECT "categoryName" FROM top_cats)
+                         THEN "categoryName" ELSE 'Others' END
+           ORDER BY date"#
     );
     let mut args = sqlx::postgres::PgArguments::default();
     let _ = args.add(from.to_string());
     let _ = args.add(to.to_string());
+    let _ = args.add(top_n as i64);
     query_agg_rows(pool, &sql, args).await
+}
+
+fn build_aggregate_result_pre_bucketed(rows: Vec<AggRow>) -> Vec<DailyAggregateDTO> {
+    let mut by_day: HashMap<String, HashMap<String, CategoryAggregateDTO>> = HashMap::new();
+    let mut day_order: Vec<String> = vec![];
+
+    for r in &rows {
+        let entry = by_day.entry(r.day.clone()).or_insert_with(|| {
+            day_order.push(r.day.clone());
+            HashMap::new()
+        });
+        let o = r.orders as f64;
+        let r_val = r.revenue;
+        let i = r.items as f64;
+        let avg = if o > 0.0 { r_val / o } else { 0.0 };
+        entry.insert(
+            r.category.clone(),
+            CategoryAggregateDTO {
+                total_orders: r.orders,
+                total_revenue: r_val,
+                total_items: r.items,
+                avg_order_value: (avg * 100.0).round() / 100.0,
+            },
+        );
+    }
+
+    day_order
+        .iter()
+        .map(|day| {
+            let cats = by_day.remove(day).unwrap_or_default();
+            let (tot_o, tot_r, tot_i) = cats.values().fold((0i64, 0.0f64, 0i64), |acc, v| {
+                (acc.0 + v.total_orders, acc.1 + v.total_revenue, acc.2 + v.total_items)
+            });
+            DailyAggregateDTO {
+                date: day.clone(),
+                categories: cats,
+                totals: TotalsDTO {
+                    total_orders: tot_o,
+                    total_revenue: tot_r,
+                    total_items: tot_i,
+                },
+            }
+        })
+        .collect()
 }
 
 async fn query_status_category_summary(
